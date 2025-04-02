@@ -14,6 +14,9 @@
 - [乘法器与除法器](#乘法器与除法器)
   - [乘法器](#乘法器)
   - [除法器](#除法器)
+- [单周期处理器](#单周期处理器)
+  - [数据通路](#数据通路)
+  - [控制信号的集成](#控制信号的集成)
 
 # 课程概述
 
@@ -542,3 +545,175 @@ $N$ 位除法器的工作流程：
   - ALU：$N$ 位，支持加法和减法
 
 这种除法器不容易做时间优化了，它不像乘法器那样可以并行地做加法和移位。
+
+
+# 单周期处理器
+
+简化 MIPS 指令集：
+
+- 无符号加减法：
+  - `addu rd, rs, rt`
+  - `subu rd, rs, rt`
+- 立即数的逻辑或：
+  - `ori rt, rs, imm16`
+- 加载存储：
+  - `lw rt, imm16(rs)`
+  - `sw rt, imm16(rs)`
+- 条件分支：
+  - `beq rs, rt, imm16`
+
+指令集的硬件需求：
+
+- ALU：
+  - 支持加法、减法、逻辑或、比较相等
+  - 操作数：2 个 32 位数，来自寄存器或 32 位立即数
+- 立即数扩展部件
+  - 将 16 位立即数扩展为 32 位
+  - 符号扩展和零扩展
+- PC
+  - 一个 32 位寄存器
+  - 两种加法：
+    - PC + 4：取指令地址
+    - PC + 4 + imm16 * 4：分支跳转地址
+- 寄存器堆
+  - 32 个 32 位寄存器
+  - 两个读端口，一个写端口
+- 存储器
+  - 只读的指令存储器（32 位地址，32 位数据）
+  - 读写的数据存储器（32 位地址，32 位数据）
+
+寄存器堆：
+
+- 32 个 32 位寄存器
+- 数据接口信号：
+  - busA, busB：32 位读端口
+  - busW：32 位写端口
+- 读写控制：
+  - Ra, Rb：5 位寄存器编号，分别对应 busA 和 busB
+  - Rw：5 位寄存器编号，对应 busW
+  - WriteEnable：写使能信号，在时钟信号 clk 的上升沿，若 WriteEnable == 1，则将 busW 写入对应寄存器
+- 注意：寄存器堆的读操作不受时钟控制
+
+存储器：
+
+- 数据接口信号：
+  - Data In：32 位数据输入
+  - Data Out：32 位数据输出
+- 读写控制
+  - Address：32 位地址
+  - WriteEnable：写使能信号，在时钟信号 clk 的上升沿，若 WriteEnable == 1，则将 Data In 写入 Address 指向的存储单元
+- 一个读端口，一个写端口
+
+## 数据通路
+
+取值单元（Instruction Fetch Unit, IFU）：
+
+- 组成部件
+  - PC：程序计数器
+  - 指令存储器
+  - 两个加法器
+  - 多选器：选择 PC + 4 或分支跳转地址
+  - 与门：跳转当且仅当 `nPC_set == 1` 且 `zero == 1`
+  - 立即数符号扩展并左移部件
+- 输入：
+  - 时钟信号 clk 
+  - 分支跳转信号 nPC_set
+  - ALU 的比较结果信号 zero
+- 输出：
+  - 指令
+
+译码、执行、访存、写回单元：
+
+- 组成部件
+  - 寄存器堆
+  - ALU
+  - 立即数扩展部件
+  - 多选器：从 rd 和 rt 中选择寄存器堆 busW
+  - 多选器：从立即数扩展部件输出和寄存器堆 busB 中选择 ALU 的第二个输入
+  - 数据存储器
+  - 多选器：从 ALU 输出和数据存储器输出中选择寄存器堆 busW
+- 输入：
+  - 时钟信号 clk
+  - ALUCtr：执行哪种运算
+  - ALUSrc：ALU 的第二个输入的选择信号
+  - 立即数
+  - RegWr：寄存器堆写使能信号
+  - RegDst：寄存器堆写端口选择信号
+  - ExtOp：立即数扩展的选择信号（符号扩展或零扩展）
+  - MemtoReg：寄存器堆 busW 选择信号
+  - MemWr：数据存储器写使能信号（是否将 busB 写入数据存储器）
+
+R 型运算指令的控制信号：以 `addu rd, rs, rt` 为例：
+
+- nPC_set："+4"
+- ALUSrc："0"，ALU 的第二个输入来自寄存器堆 busB
+- ExtOp: 任意
+- ALUCtr："ADD"
+- MemWr: "0"
+- MemtoReg: "0"，寄存器堆 busW 选择 ALU 的输出
+- RegWr: "1"
+- RegDst: "1"，寄存器堆写端口选择寄存器 rd
+
+I 型运算指令的控制信号：以 `ori rt, rs, imm16` 为例：
+
+- nPC_set："+4"
+- ALUSrc："1"，ALU 的第二个输入来自立即数扩展部件
+- ExtOp: "0"，立即数扩展为零扩展
+- ALUCtr："OR"
+- MemWr: "0"
+- MemtoReg: "0"，寄存器堆 busW 选择 ALU 的输出
+- RegWr: "1"
+- RegDst: "0"，寄存器堆写端口选择寄存器 rt
+
+加载指令的控制信号：以 `lw rt, imm16(rs)` 为例：
+
+- nPC_set："+4"
+- ALUSrc："1"，ALU 的第二个输入来自立即数扩展部件
+- ExtOp: "1"，立即数扩展为符号扩展
+- ALUCtr："ADD"
+- MemWr: "0"
+- MemtoReg: "1"，寄存器堆 busW 选择数据存储器的输出
+- RegWr: "1"
+- RegDst: "0"，寄存器堆写端口选择寄存器 rt
+
+跳转指令的控制信号：以 `beq rs, rt, imm16` 为例：
+
+- nPC_set："branch"
+- ALUSrc："0"，ALU 的第二个输入来自寄存器堆 busB
+- ExtOp: 任意
+- ALUCtr："SUB"
+- MemWr: "0"
+- MemtoReg: "x"
+- RegWr: "0"
+- RegDst: "x"
+
+## 控制信号的集成
+
+指令类型的控制信号可以由 opcode 和 func 只经**逻辑与**得到：
+
+- rtype = ~op5 & ~op4 & ~op3 & ~op2 & ~op1 & ~op0
+  - 即 op 的 6 位都为 0
+- add = rtype & func5 & ~func4 & ~func3 & ~func2 & ~func1 & ~func0
+  - 即指令为 R 型且 func 为 100000
+- sub = rtype & func5 & ~func4 & ~func3 & func2 & func1 & ~func0
+  - 即指令为 R 型且 func 为 100010
+- 其余指令同理
+
+控制 CPU 执行的 8 个控制信号可以由指令类型的控制信号只经**逻辑或**得到：
+
+- nPC_set = beq
+- ALUSrc = ori | lw | sw
+- ExtOp = lw | sw
+- ALUCtr[0] = sub | beq
+- ALUCtr[1] = ori
+- MemWr = sw
+- MemtoReg = lw
+- RegWr = add | sub | ori | lw
+- RegDst = add | sub
+
+其中 ALUctr 有两位：
+
+- 00：加法
+- 01：减法
+- 10：逻辑或
+
